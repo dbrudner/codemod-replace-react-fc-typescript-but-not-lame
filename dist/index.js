@@ -19,7 +19,7 @@ const isArrowFunctionExpression = (x) => x.type === 'ArrowFunctionExpression';
 const isCallExpression = (x) => x?.type === 'CallExpression';
 const isTSIntersectionType = (x) => x?.type === 'TSIntersectionType';
 exports.default = (fileInfo, { j }) => {
-    function addPropsTypeToComponentBody(n) {
+    function addPropsTypeToComponentBody(n, root, j) {
         // extract the Prop's type text
         let reactFcOrSfcNode;
         if (isIdentifier(n.node.id)) {
@@ -30,13 +30,81 @@ exports.default = (fileInfo, { j }) => {
                 reactFcOrSfcNode = n.node.id.typeAnnotation.typeAnnotation;
             }
         }
+        const componentFunctionNode = (isCallExpression(n.node.init) ? n.node.init.arguments[0] : n.node.init);
+        // Get firstParam before we use it
+        const firstParam = componentFunctionNode.params[0];
         // shape of React.FC (no props)
         if (!reactFcOrSfcNode?.typeParameters) {
+            // If component is using React.FC without type params and has children, we should add the type
+            if (firstParam && isObjectPattern(firstParam) &&
+                firstParam.properties.some(p => (p.type === 'Property' || p.type === 'ObjectProperty') &&
+                    (p.key?.name === 'children' || p.value?.name === 'children'))) {
+                const childrenProp = j.tsPropertySignature(j.identifier('children'), j.tsTypeAnnotation(j.tsTypeReference(j.identifier('ReactNode'))));
+                childrenProp.optional = true;
+                const outerNewTypeAnnotation = j.tsTypeAnnotation(j.tsTypeLiteral([childrenProp]));
+                // Add ReactNode import
+                ensureReactNodeImport(j, root);
+                // Update the parameter type
+                if (isObjectPattern(firstParam)) {
+                    const { properties, ...restParams } = firstParam;
+                    let componentFunctionFirstParameter = j.objectPattern.from({
+                        ...restParams,
+                        properties: properties.map(({ loc, ...rest }) => {
+                            const key = rest.type.slice(0, 1).toLowerCase() + rest.type.slice(1);
+                            if (key === 'restElement') {
+                                const prop = rest;
+                                return j.restProperty.from({ argument: prop.argument });
+                            }
+                            return j[key].from({ ...rest });
+                        }),
+                        typeAnnotation: outerNewTypeAnnotation,
+                    });
+                    let newInit;
+                    if (isArrowFunctionExpression(componentFunctionNode)) {
+                        newInit = j.arrowFunctionExpression.from({
+                            ...componentFunctionNode,
+                            params: [componentFunctionFirstParameter],
+                        });
+                    }
+                    else {
+                        newInit = j.functionExpression.from({
+                            ...componentFunctionNode,
+                            params: [componentFunctionFirstParameter],
+                        });
+                    }
+                    const newVariableDeclarator = j.variableDeclarator.from({
+                        ...n.node,
+                        init: newInit
+                    });
+                    n.replace(newVariableDeclarator);
+                }
+            }
             return;
         }
-        const outerNewTypeAnnotation = extractPropsDefinitionFromReactFC(j, reactFcOrSfcNode);
+        // Check if children is used in the parameters or body
+        const usesChildren = firstParam && (
+        // Check destructured children in params
+        (isObjectPattern(firstParam) &&
+            firstParam.properties.some(p => (p.type === 'Property' || p.type === 'ObjectProperty') &&
+                (p.key?.name === 'children' || p.value?.name === 'children'))) ||
+            // Check props.children usage in body
+            (isIdentifier(firstParam) &&
+                j(componentFunctionNode).find(j.MemberExpression, {
+                    object: { name: firstParam.name },
+                    property: { name: 'children' }
+                }).length > 0) ||
+            // Check if children is used in JSX
+            j(componentFunctionNode).find(j.JSXElement).some(path => path.node.children.some((child) => child.type === 'JSXExpressionContainer' &&
+                child.expression.name === 'children')) ||
+            // Check if the component is using React.FC without props (should add children)
+            !reactFcOrSfcNode.typeParameters);
+        // Only add ReactNode import if we're adding children type
+        if (usesChildren) {
+            ensureReactNodeImport(j, root);
+        }
+        // Only add children type if it's used
+        const outerNewTypeAnnotation = extractPropsDefinitionFromReactFC(j, reactFcOrSfcNode, usesChildren);
         // build the new nodes
-        const componentFunctionNode = (isCallExpression(n.node.init) ? n.node.init.arguments[0] : n.node.init);
         const paramsLength = componentFunctionNode?.params?.length;
         // The remaining parameters except the first parameter
         let restParameters = [];
@@ -47,8 +115,7 @@ exports.default = (fileInfo, { j }) => {
         else {
             restParameters = componentFunctionNode.params.slice(1, paramsLength);
         }
-        const firstParam = componentFunctionNode.params[0];
-        let componentFunctionFirstParameter;
+        let componentFunctionFirstParameter = undefined;
         // form of (props) =>
         if (isIdentifier(firstParam)) {
             componentFunctionFirstParameter = j.identifier.from({
@@ -114,10 +181,27 @@ exports.default = (fileInfo, { j }) => {
         });
         n.replace(newVariableDeclarator);
     }
+    function ensureReactNodeImport(j, root) {
+        const reactImports = root.find(j.ImportDeclaration, {
+            source: { value: 'react' }
+        });
+        if (reactImports.length === 0)
+            return;
+        const firstReactImport = reactImports.get(0);
+        const existingSpecifiers = firstReactImport.node.specifiers;
+        // Check if ReactNode is already imported
+        const hasReactNode = existingSpecifiers.some((spec) => spec.type === 'ImportSpecifier' && spec.imported.name === 'ReactNode');
+        if (!hasReactNode) {
+            firstReactImport.node.specifiers = [
+                ...existingSpecifiers,
+                j.importSpecifier(j.identifier('ReactNode'))
+            ];
+        }
+    }
     try {
         const root = j(fileInfo.source);
         let hasModifications = false;
-        const newSource = root
+        root
             .find(j.VariableDeclarator, (n) => {
             const identifier = n?.id;
             let typeName;
@@ -139,41 +223,70 @@ exports.default = (fileInfo, { j }) => {
         })
             .forEach((n) => {
             hasModifications = true;
-            addPropsTypeToComponentBody(n);
+            addPropsTypeToComponentBody(n, root, j);
             removeReactFCorSFCdeclaration(n);
-        })
-            .toSource();
-        return hasModifications ? newSource : null;
+        });
+        if (hasModifications) {
+            return root.toSource();
+        }
+        return null;
     }
     catch (e) {
         console.log(e);
     }
 };
-function extractPropsDefinitionFromReactFC(j, reactFcOrSfcNode) {
+function extractPropsDefinitionFromReactFC(j, reactFcOrSfcNode, addChildren = false) {
     const typeParameterFirstParam = reactFcOrSfcNode.typeParameters.params[0];
     let newInnerTypeAnnotation;
-    // form of React.FC<Props> or React.SFC<Props>
     if (isTsTypeReference(typeParameterFirstParam)) {
         const { loc, ...rest } = typeParameterFirstParam;
-        newInnerTypeAnnotation = j.tsTypeReference.from({ ...rest });
+        if (addChildren) {
+            const childrenProp = j.tsPropertySignature(j.identifier('children'), j.tsTypeAnnotation(j.tsTypeReference(j.identifier('ReactNode'))));
+            childrenProp.optional = true;
+            newInnerTypeAnnotation = j.tsIntersectionType([
+                j.tsTypeReference.from({ ...rest }),
+                j.tsTypeLiteral([childrenProp])
+            ]);
+        }
+        else {
+            newInnerTypeAnnotation = j.tsTypeReference.from({ ...rest });
+        }
     }
     else if (isTsIntersectionType(typeParameterFirstParam)) {
         // form of React.FC<Props & Props2>
         const { loc, ...rest } = typeParameterFirstParam;
-        newInnerTypeAnnotation = j.tsIntersectionType.from({
-            ...rest,
-            types: rest.types.map((t) => buildDynamicalNodeByType(j, t)),
-        });
+        if (addChildren) {
+            const childrenProp = j.tsPropertySignature(j.identifier('children'), j.tsTypeAnnotation(j.tsTypeReference(j.identifier('ReactNode'))));
+            childrenProp.optional = true;
+            newInnerTypeAnnotation = j.tsIntersectionType([
+                ...rest.types.map((t) => buildDynamicalNodeByType(j, t)),
+                j.tsTypeLiteral([childrenProp])
+            ]);
+        }
+        else {
+            newInnerTypeAnnotation = j.tsIntersectionType.from({
+                ...rest,
+                types: rest.types.map((t) => buildDynamicalNodeByType(j, t)),
+            });
+        }
     }
     else {
         // form of React.FC<{ foo: number }> or React.SFC<{ foo: number }>
         const inlineTypeDeclaration = typeParameterFirstParam;
-        // remove locations to avoid messing up with commans
-        const newMembers = inlineTypeDeclaration.members.map((m) => buildDynamicalNodeByType(j, m));
-        newInnerTypeAnnotation = j.tsTypeLiteral.from({ members: newMembers });
+        if (addChildren) {
+            const childrenProp = j.tsPropertySignature(j.identifier('children'), j.tsTypeAnnotation(j.tsTypeReference(j.identifier('ReactNode'))));
+            childrenProp.optional = true;
+            newInnerTypeAnnotation = j.tsTypeLiteral([
+                ...inlineTypeDeclaration.members.map((m) => buildDynamicalNodeByType(j, m)),
+                childrenProp
+            ]);
+        }
+        else {
+            const newMembers = inlineTypeDeclaration.members.map((m) => buildDynamicalNodeByType(j, m));
+            newInnerTypeAnnotation = j.tsTypeLiteral.from({ members: newMembers });
+        }
     }
-    const outerNewTypeAnnotation = j.tsTypeAnnotation.from({ typeAnnotation: newInnerTypeAnnotation });
-    return outerNewTypeAnnotation;
+    return j.tsTypeAnnotation.from({ typeAnnotation: newInnerTypeAnnotation });
 }
 // dynamically call the api method to build the proper node. For example TSPropertySignature becomes tsPropertySignature
 function buildDynamicalNodeByType(j, { loc, ...rest }) {

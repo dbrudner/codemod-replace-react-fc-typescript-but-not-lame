@@ -20,11 +20,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/gndelia/codemod-replace-react-fc-typescript"
+    "url": "https://github.com/dbrudner/codemod-replace-react-fc-typescript-with-children"
   },
-  "homepage": "https://github.com/gndelia/codemod-replace-react-fc-typescript",
+  "homepage": "https://github.com/dbrudner/codemod-replace-react-fc-typescript-with-children",
   "bugs": {
-    "url": "https://github.com/gndelia/codemod-replace-react-fc-typescript/issues"
+    "url": "https://github.com/dbrudner/codemod-replace-react-fc-typescript-with-children/issues"
   },
   "author": {
     "name": "Gonzalo D'Elia",

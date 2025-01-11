@@ -36,6 +36,22 @@ const testCases: TestCase[] = [
     input: `
       import React from 'react'
 
+      type Props = { id: number };
+      const MyComponent: React.SFC<Props> = (props) => {
+        return <span>{props.id}</span>
+      }`,
+    output: `
+      import React from 'react'
+
+      type Props = { id: number };
+      const MyComponent = (props: Props) => {
+        return <span>{props.id}</span>
+      }`,
+  },
+  {
+    input: `
+      import React from 'react'
+
       type Props2 = { id: number };
       export const MyComponent2: React.FC<Props2> = (props) => {
         return <span>{props.id}</span>
@@ -126,7 +142,7 @@ const testCases: TestCase[] = [
     input: `
       import React from 'react'
 
-      export const MyComponent4: React.FC<{ inlineProp: number, disabled?: boolean }> = (props) => <span>{\`\${props.inlineProp}-\${props.disabled}\`}</span>
+      export const MyComponent4: React.SFC<{ inlineProp: number, disabled?: boolean }> = (props) => <span>{\`\${props.inlineProp}-\${props.disabled}\`}</span>
     `,
     output: `
       import React from 'react'
@@ -882,3 +898,70 @@ testCases.forEach(({ input, output }, index) => {
     })
   })
 })
+
+describe('React.FC children transformation', () => {
+  it('should add children type when transforming React.FC', () => {
+    const input = `
+      import React from 'react';
+      type Props = { title: string };
+      const Component: React.FC<Props> = ({ title, children }) => <div>{title}{children}</div>;
+    `;
+
+    const output = `
+      import React, { ReactNode } from 'react';
+      type Props = { title: string };
+      const Component = ( { title, children }: Props & { children?: ReactNode } ) => <div>{title}{children}</div>;
+    `;
+
+    const j = withParser('tsx');
+    const result = transform(
+      { source: input, path: '' },
+      { j, jscodeshift: j, stats: jest.fn(), report: jest.fn() }
+    )?.trim();
+
+    expect(escapeLineEndingsAndMultiWhiteSpaces(result))
+      .toBe(escapeLineEndingsAndMultiWhiteSpaces(output));
+  });
+
+  it('should handle inline props with children', () => {
+    const input = `
+      import React from 'react';
+      const Component: React.FC<{ title: string }> = ({ title, children }) => <div>{title}{children}</div>;
+    `;
+
+    const output = `
+      import React, { ReactNode } from 'react';
+      const Component = ( { title, children }: { title: string, children?: ReactNode } ) => <div>{title}{children}</div>;
+    `;
+
+    const j = withParser('tsx');
+    const result = transform(
+      { source: input, path: '' },
+      { j, jscodeshift: j, stats: jest.fn(), report: jest.fn() }
+    )?.trim();
+
+    expect(escapeLineEndingsAndMultiWhiteSpaces(result))
+      .toBe(escapeLineEndingsAndMultiWhiteSpaces(output));
+  });
+
+  it('should add ReactNode import to existing named imports', () => {
+    const input = `
+      import React, { useState } from 'react';
+      const Component: React.FC = ({ children }) => <div>{children}</div>;
+    `;
+
+    const output = `
+      import React, { useState, ReactNode } from 'react';
+      const Component = ( { children }: { children?: ReactNode } ) => <div>{children}</div>;
+    `;
+
+    const j = withParser('tsx');
+    const result = transform(
+      { source: input, path: '' },
+      { j, jscodeshift: j, stats: jest.fn(), report: jest.fn() }
+    )?.trim();
+
+    expect(escapeLineEndingsAndMultiWhiteSpaces(result))
+      .toBe(escapeLineEndingsAndMultiWhiteSpaces(output));
+  });
+});
